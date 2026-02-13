@@ -44,6 +44,10 @@ class ExecutionConfig:
     enable_loop_detection: bool = True
     loop_detection_window: int = 10  # Check last 10 calls for identical patterns
     
+    # Loop recovery
+    enable_loop_recovery: bool = True  # Try to recover from loops instead of failing
+    max_loop_recovery_attempts: int = 2  # Max attempts to break out of a loop
+    
     # Progress tracking
     enable_progress_tracking: bool = True
     progress_window: int = 15  # Check last 15 outputs for changes
@@ -219,6 +223,7 @@ class DAGExecutor:
                 )
 
             tool_call_count = 0
+            loop_recovery_count = 0  # Track loop recovery attempts
 
             while True:
                 # Soft warning at thresholds (50, 100, 150, etc.)
@@ -238,12 +243,32 @@ class DAGExecutor:
                         )
                         break
                 
-                # Intelligent loop detection
-                if self._detect_repeated_calls(task):
-                    return ExecutionResult(
-                        success=False,
-                        error=f"Infinite loop detected: same tool call repeated {self.config.loop_detection_window} times"
-                    )
+                # Intelligent loop detection with recovery
+                is_loop, loop_info = self._detect_repeated_calls(task)
+                if is_loop:
+                    if self.config.enable_loop_recovery and loop_recovery_count < self.config.max_loop_recovery_attempts:
+                        # Inject recovery prompt and give LLM another chance
+                        loop_recovery_count += 1
+                        logger.warning(
+                            f"Loop recovery attempt {loop_recovery_count}/{self.config.max_loop_recovery_attempts} "
+                            f"for task {task.id}"
+                        )
+                        
+                        # Add recovery prompt to conversation
+                        messages.append({
+                            "role": "user",
+                            "content": loop_info["recovery_prompt"]
+                        })
+                        
+                        # Continue to give LLM a chance to respond
+                        # Don't increment tool_call_count here as we're just adding guidance
+                    else:
+                        # Max recovery attempts reached or recovery disabled
+                        return ExecutionResult(
+                            success=False,
+                            error=f"Infinite loop detected: '{loop_info['tool_name']}' called {loop_info['count']} times. "
+                                  f"Recovery attempts exhausted ({loop_recovery_count} attempts made)."
+                        )
                 
                 # Progress tracking
                 if not self._is_making_progress(task):
@@ -368,17 +393,20 @@ class DAGExecutor:
             lines.append(f"  - {tc.name}: {error}")
         return "\n".join(lines)
 
-    def _detect_repeated_calls(self, task: TaskNode) -> bool:
+    def _detect_repeated_calls(self, task: TaskNode) -> tuple[bool, dict[str, any] | None]:
         """Detect if the same tool call is being repeated with identical arguments.
         
-        Returns True if the last N tool calls are identical (same name and args),
-        indicating a potential infinite loop.
+        Returns (is_loop, loop_info) where loop_info contains:
+        - tool_name: Name of the repeated tool
+        - arguments: Arguments being repeated
+        - count: Number of repetitions
+        - recovery_prompt: Suggested recovery guidance
         """
         if not self.config.enable_loop_detection:
-            return False
+            return False, None
             
         if len(task.tool_calls) < self.config.loop_detection_window:
-            return False
+            return False, None
         
         recent = task.tool_calls[-self.config.loop_detection_window:]
         first = recent[0]
@@ -386,14 +414,60 @@ class DAGExecutor:
         # Check if all recent calls have same name and arguments
         for call in recent[1:]:
             if call.name != first.name or call.arguments != first.arguments:
-                return False
+                return False, None
         
-        # All calls in window are identical
+        # All calls in window are identical - loop detected
         logger.warning(
             f"Loop detected in task {task.id}: "
             f"'{first.name}' called {self.config.loop_detection_window} times with same arguments"
         )
-        return True
+        
+        # Build recovery information
+        loop_info = {
+            "tool_name": first.name,
+            "arguments": first.arguments,
+            "count": self.config.loop_detection_window,
+            "recovery_prompt": self._build_loop_recovery_prompt(first.name, first.arguments, recent)
+        }
+        
+        return True, loop_info
+
+    def _build_loop_recovery_prompt(self, tool_name: str, arguments: dict, recent_calls: list) -> str:
+        """Build a recovery prompt to help the LLM break out of a loop."""
+        # Get error messages from failed calls
+        errors = []
+        for tc in recent_calls:
+            if tc.result and not tc.result.get("success", False):
+                error = tc.result.get("error", "Unknown error")
+                if error not in errors:
+                    errors.append(error)
+        
+        prompt = f"""
+⚠️ INFINITE LOOP DETECTED
+
+You have called '{tool_name}' {len(recent_calls)} times in a row with identical arguments.
+
+This approach is clearly not working. Each attempt produced the same error(s):
+"""
+        
+        for error in errors[:3]:  # Show up to 3 unique errors
+            prompt += f"\n  - {error}"
+        
+        prompt += """
+
+You MUST try a DIFFERENT approach. Here are your options:
+
+1. **Use a different tool** - The current tool is failing repeatedly
+2. **Modify your arguments** - Try different parameters or inputs
+3. **Break down the problem** - Solve it in smaller steps
+4. **Acknowledge limitations** - If the task is impossible, explain why
+
+DO NOT call the same tool with the same arguments again. That will not work.
+
+What alternative approach will you try?
+"""
+        
+        return prompt
 
     def _is_making_progress(self, task: TaskNode) -> bool:
         """Check if recent tool calls are producing different outputs.
@@ -451,11 +525,14 @@ class DAGExecutor:
             return ""
 
         lines = []
-        lines.append(f"⚠️ RETRY ATTEMPT #{task.retry_count}")
+        lines.append(f"[WARN] RETRY ATTEMPT #{task.retry_count}")
         lines.append("")
         lines.append("Your previous attempt failed with the following error:")
         lines.append(f"{task.error}")
         lines.append("")
+
+        # Check if this was a loop-related failure
+        is_loop_failure = "loop" in task.error.lower() or "repeated" in task.error.lower()
 
         # List failed tool calls
         failed_tools = [
@@ -470,11 +547,25 @@ class DAGExecutor:
                 lines.append(f"  - {tc.name}: {error_msg}")
             lines.append("")
 
-        lines.append("Please analyze what went wrong and correct your approach. Pay special attention to:")
-        lines.append("  - Syntax errors in generated code (check for missing commas, quotes, brackets)")
-        lines.append("  - Missing imports or dependencies (use pip_install if needed)")
-        lines.append("  - Incorrect function arguments or data types")
-        lines.append("  - JSON formatting issues")
+        if is_loop_failure:
+            # Loop-specific guidance
+            lines.append("This failure was caused by REPEATING THE SAME APPROACH that didn't work.")
+            lines.append("")
+            lines.append("For this retry, you MUST:")
+            lines.append("  - Use a DIFFERENT tool than before")
+            lines.append("  - Try a DIFFERENT strategy or approach")
+            lines.append("  - Break the problem into smaller steps")
+            lines.append("  - If impossible, explain why clearly")
+            lines.append("")
+            lines.append("DO NOT repeat the same tool calls that failed before.")
+        else:
+            # General retry guidance
+            lines.append("Please analyze what went wrong and correct your approach. Pay special attention to:")
+            lines.append("  - Syntax errors in generated code (check for missing commas, quotes, brackets)")
+            lines.append("  - Missing imports or dependencies (use pip_install if needed)")
+            lines.append("  - Incorrect function arguments or data types")
+            lines.append("  - JSON formatting issues")
+
         lines.append("")
         lines.append("---")
         lines.append("")
