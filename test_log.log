@@ -1,0 +1,2 @@
+2026-02-13 12:49:59,532 [INFO] __main__: Testing unicode: 🔧 📦 ▶ ✓ ✗
+2026-02-13 12:49:59,532 [INFO] __main__: Testing special chars: ‘Quotes’ and — dashes

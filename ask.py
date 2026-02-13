@@ -28,7 +28,7 @@ execution_dir.mkdir(parents=True, exist_ok=True)
 os.chdir(execution_dir)
 
 # Configure logging with different levels for file and terminal
-file_handler = logging.FileHandler("chatbot.log")
+file_handler = logging.FileHandler("chatbot.log", encoding="utf-8")
 file_handler.setLevel(logging.INFO)  # Verbose file logs
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 

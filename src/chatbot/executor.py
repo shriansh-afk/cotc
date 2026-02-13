@@ -220,6 +220,11 @@ class DAGExecutor:
                     "call pip_install with packages=['requests'], then retry your code."
                     "\n- For packages with specific versions, include them: packages=['requests>=2.28.0']"
                     "\n- Only report errors if pip_install fails after attempting installation."
+                    "\n\n**Package Installation Best Practices:**"
+                    "\n- Install latest compatible versions unless a specific version is strictly required."
+                    "\n- If installation fails with 'No matching distribution' or 'Conflicting dependencies', "
+                    "retry WITHOUT version constraints (e.g., install 'torch' instead of 'torch==2.0.0')."
+                    "\n- Avoid trying random old versions if the latest version fails; check the error message for supported versions."
                 )
 
             tool_call_count = 0
