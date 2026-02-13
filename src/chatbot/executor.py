@@ -35,7 +35,7 @@ class ExecutionConfig:
     task_timeout: float = 300.0
     max_parallel_tasks: int = 10
     enable_tools: bool = True
-    max_tool_calls_per_task: int = 30
+    max_tool_calls_per_task: int = 100
     allowed_tools: list[str] | None = None  # None = all tools
     skip_simplicity_check: bool = False  # Allow bypassing simplicity check for testing
     ask_for_help_on_failure: bool = True  # Ask user for help when critical tasks fail
@@ -112,7 +112,7 @@ class DAGExecutor:
                 continue
 
             # Execute ready tasks in parallel
-            logger.warning(f"▶ Executing {len(tasks_to_execute)} task(s): {', '.join(t.name or t.id for t in tasks_to_execute)}")
+            logger.warning(f"[EXEC] Executing {len(tasks_to_execute)} task(s): {', '.join(t.name or t.id for t in tasks_to_execute)}")
             results = await self._parallel_execute(tasks_to_execute, dag)
 
             for task, result in results:
@@ -120,9 +120,9 @@ class DAGExecutor:
                     task.status = TaskStatus.COMPLETED
                     task.result = result.value
                     completed.add(task.id)
-                    logger.warning(f"✓ Completed: {task.name or task.id}")
+                    logger.warning(f"[OK] Completed: {task.name or task.id}")
                 else:
-                    logger.warning(f"✗ Failed: {task.name or task.id} - {result.error or 'Unknown error'}")
+                    logger.warning(f"[FAIL] Failed: {task.name or task.id} - {result.error or 'Unknown error'}")
                     await self._handle_failure(dag, task, result.error or "Unknown error", failed, skipped)
 
             await self.checkpoint_manager.save_checkpoint(dag)
@@ -259,9 +259,9 @@ class DAGExecutor:
                     
                     # Log important tool calls to terminal
                     if tool_call.name == "pip_install":
-                        logger.warning(f"  📦 Installing packages: {tool_call.arguments.get('packages', [])}")
+                        logger.warning(f"  [PKG] Installing packages: {tool_call.arguments.get('packages', [])}")
                     elif tool_call.name in ["python_execute", "web_download", "web_search"]:
-                        logger.info(f"  🔧 Using tool: {tool_call.name}")
+                        logger.info(f"  [TOOL] Using tool: {tool_call.name}")
 
                     result = await self.tool_registry.execute(
                         tool_call.name, tool_call.arguments
@@ -331,9 +331,52 @@ class DAGExecutor:
             lines.append(f"  - {tc.name}: {error}")
         return "\n".join(lines)
 
+    def _build_retry_context(self, task: TaskNode) -> str:
+        """Build retry context with error information from previous attempts."""
+        if task.retry_count == 0:
+            return ""
+
+        lines = []
+        lines.append(f"⚠️ RETRY ATTEMPT #{task.retry_count}")
+        lines.append("")
+        lines.append("Your previous attempt failed with the following error:")
+        lines.append(f"{task.error}")
+        lines.append("")
+
+        # List failed tool calls
+        failed_tools = [
+            tc for tc in task.tool_calls
+            if tc.result and not tc.result.get("success", False)
+        ]
+
+        if failed_tools:
+            lines.append("Failed tool calls:")
+            for tc in failed_tools:
+                error_msg = tc.result.get("error", "Unknown error") if tc.result else "Unknown error"
+                lines.append(f"  - {tc.name}: {error_msg}")
+            lines.append("")
+
+        lines.append("Please analyze what went wrong and correct your approach. Pay special attention to:")
+        lines.append("  - Syntax errors in generated code (check for missing commas, quotes, brackets)")
+        lines.append("  - Missing imports or dependencies (use pip_install if needed)")
+        lines.append("  - Incorrect function arguments or data types")
+        lines.append("  - JSON formatting issues")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+        return "\n".join(lines)
+
     def _build_task_prompt(self, task: TaskNode, dag: TaskDAG) -> str:
         """Build the prompt for a task, including dependency results."""
-        prompt_parts = [task.prompt]
+        prompt_parts = []
+
+        # Add retry context if this is a retry attempt
+        retry_context = self._build_retry_context(task)
+        if retry_context:
+            prompt_parts.append(retry_context)
+
+        prompt_parts.append(task.prompt)
 
         # Add context from dependencies
         dep_context = []
