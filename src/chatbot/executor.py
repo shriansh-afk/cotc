@@ -35,10 +35,23 @@ class ExecutionConfig:
     task_timeout: float = 300.0
     max_parallel_tasks: int = 10
     enable_tools: bool = True
-    max_tool_calls_per_task: int = 100
+    
+    # Tool call limits
+    max_tool_calls_per_task: int | None = None  # None = unlimited
+    soft_warning_threshold: int = 50  # Warn at 50, 100, 150, etc.
+    
+    # Loop detection
+    enable_loop_detection: bool = True
+    loop_detection_window: int = 3  # Check last 3 calls for identical patterns
+    
+    # Progress tracking
+    enable_progress_tracking: bool = True
+    progress_window: int = 5  # Check last 5 outputs for changes
+    
     allowed_tools: list[str] | None = None  # None = all tools
     skip_simplicity_check: bool = False  # Allow bypassing simplicity check for testing
     ask_for_help_on_failure: bool = True  # Ask user for help when critical tasks fail
+
 
 
 class DAGExecutor:
@@ -208,12 +221,36 @@ class DAGExecutor:
             tool_call_count = 0
 
             while True:
-                # Check tool call limit
-                if tool_call_count >= self.config.max_tool_calls_per_task:
+                # Soft warning at thresholds (50, 100, 150, etc.)
+                if (self.config.soft_warning_threshold and 
+                    tool_call_count > 0 and 
+                    tool_call_count % self.config.soft_warning_threshold == 0):
                     logger.warning(
-                        f"Task {task.id} reached max tool calls ({self.config.max_tool_calls_per_task})"
+                        f"Task {task.id} has made {tool_call_count} tool calls "
+                        f"(soft warning threshold: {self.config.soft_warning_threshold})"
                     )
-                    break
+                
+                # Hard limit check (if configured)
+                if self.config.max_tool_calls_per_task is not None:
+                    if tool_call_count >= self.config.max_tool_calls_per_task:
+                        logger.warning(
+                            f"Task {task.id} reached max tool calls ({self.config.max_tool_calls_per_task})"
+                        )
+                        break
+                
+                # Intelligent loop detection
+                if self._detect_repeated_calls(task):
+                    return ExecutionResult(
+                        success=False,
+                        error=f"Infinite loop detected: same tool call repeated {self.config.loop_detection_window} times"
+                    )
+                
+                # Progress tracking
+                if not self._is_making_progress(task):
+                    return ExecutionResult(
+                        success=False,
+                        error=f"Task stuck: no progress in last {self.config.progress_window} tool calls"
+                    )
 
                 # Call LLM with tools
                 response = await asyncio.wait_for(
@@ -330,6 +367,71 @@ class DAGExecutor:
             error = tc.result.get("error", "Unknown") if tc.result else "Unknown"
             lines.append(f"  - {tc.name}: {error}")
         return "\n".join(lines)
+
+    def _detect_repeated_calls(self, task: TaskNode) -> bool:
+        """Detect if the same tool call is being repeated with identical arguments.
+        
+        Returns True if the last N tool calls are identical (same name and args),
+        indicating a potential infinite loop.
+        """
+        if not self.config.enable_loop_detection:
+            return False
+            
+        if len(task.tool_calls) < self.config.loop_detection_window:
+            return False
+        
+        recent = task.tool_calls[-self.config.loop_detection_window:]
+        first = recent[0]
+        
+        # Check if all recent calls have same name and arguments
+        for call in recent[1:]:
+            if call.name != first.name or call.arguments != first.arguments:
+                return False
+        
+        # All calls in window are identical
+        logger.warning(
+            f"Loop detected in task {task.id}: "
+            f"'{first.name}' called {self.config.loop_detection_window} times with same arguments"
+        )
+        return True
+
+    def _is_making_progress(self, task: TaskNode) -> bool:
+        """Check if recent tool calls are producing different outputs.
+        
+        Returns False if the last N tool outputs are all identical,
+        indicating the task is stuck and not making progress.
+        """
+        if not self.config.enable_progress_tracking:
+            return True  # Progress tracking disabled
+            
+        if len(task.tool_calls) < self.config.progress_window:
+            return True  # Not enough data yet
+        
+        recent = task.tool_calls[-self.config.progress_window:]
+        
+        # Extract outputs from successful tool calls
+        outputs = []
+        for tc in recent:
+            if tc.result:
+                output = str(tc.result.get("output", ""))
+                # Normalize whitespace for comparison
+                output = " ".join(output.split())
+                outputs.append(output)
+        
+        if not outputs:
+            return True  # No outputs to compare
+        
+        # If all outputs are identical, no progress is being made
+        unique_outputs = set(outputs)
+        if len(unique_outputs) == 1 and len(outputs) >= self.config.progress_window:
+            logger.warning(
+                f"No progress detected in task {task.id}: "
+                f"last {self.config.progress_window} tool calls produced identical output"
+            )
+            return False
+        
+        return True
+
 
     def _build_retry_context(self, task: TaskNode) -> str:
         """Build retry context with error information from previous attempts."""
