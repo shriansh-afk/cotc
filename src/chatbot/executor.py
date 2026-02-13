@@ -42,11 +42,11 @@ class ExecutionConfig:
     
     # Loop detection
     enable_loop_detection: bool = True
-    loop_detection_window: int = 3  # Check last 3 calls for identical patterns
+    loop_detection_window: int = 10  # Check last 10 calls for identical patterns
     
     # Progress tracking
     enable_progress_tracking: bool = True
-    progress_window: int = 5  # Check last 5 outputs for changes
+    progress_window: int = 15  # Check last 15 outputs for changes
     
     allowed_tools: list[str] | None = None  # None = all tools
     skip_simplicity_check: bool = False  # Allow bypassing simplicity check for testing
@@ -409,10 +409,16 @@ class DAGExecutor:
         
         recent = task.tool_calls[-self.config.progress_window:]
         
-        # Extract outputs from successful tool calls
+        # Extract outputs from tool calls
         outputs = []
+        failed_count = 0
+        
         for tc in recent:
             if tc.result:
+                # Count failures
+                if not tc.result.get("success", False):
+                    failed_count += 1
+                
                 output = str(tc.result.get("output", ""))
                 # Normalize whitespace for comparison
                 output = " ".join(output.split())
@@ -421,12 +427,18 @@ class DAGExecutor:
         if not outputs:
             return True  # No outputs to compare
         
-        # If all outputs are identical, no progress is being made
+        # Only flag as stuck if:
+        # 1. ALL outputs are identical (not just similar)
+        # 2. AND most recent calls are failing
         unique_outputs = set(outputs)
-        if len(unique_outputs) == 1 and len(outputs) >= self.config.progress_window:
+        all_identical = len(unique_outputs) == 1 and len(outputs) >= self.config.progress_window
+        mostly_failing = failed_count >= (self.config.progress_window * 0.7)  # 70% failure rate
+        
+        if all_identical and mostly_failing:
             logger.warning(
                 f"No progress detected in task {task.id}: "
-                f"last {self.config.progress_window} tool calls produced identical output"
+                f"last {self.config.progress_window} tool calls produced identical output "
+                f"with {failed_count} failures"
             )
             return False
         
