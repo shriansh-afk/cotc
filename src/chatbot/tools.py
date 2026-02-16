@@ -648,6 +648,42 @@ class PipInstallTool(Tool):
         # Examples: requests, scikit-learn, package[extra], package>=1.0.0
         pattern = r'^[a-zA-Z0-9_\-\.\[\]>=<,\s]+$'
 
+        return bool(re.match(pattern, package))
+
+    async def execute(self, packages: list[str], upgrade: bool = False, **kwargs: Any) -> ToolResult:
+        """Install packages."""
+        # Validate packages
+        if not packages:
+             return ToolResult(success=False, output=None, error="No packages specified")
+             
+        for pkg in packages:
+            if not self._validate_package_name(pkg):
+                return ToolResult(
+                    success=False, 
+                    output=None, 
+                    error=f"Invalid package name: {pkg}. Only alphanumeric, -, _, ., and version specifiers allowed."
+                )
+
+        # Use PackageManager
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, 
+                lambda: self.package_manager.install(packages, upgrade=upgrade)
+            )
+
+            if result["success"]:
+                return ToolResult(success=True, output=result["message"])
+            else:
+                return ToolResult(success=False, output=None, error=result.get("error", "Unknown error"))
+
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=str(e))
+
+
+class WebDownloadTool(Tool):
+    """Download content from a URL."""
+
     name = "web_download"
     description = (
         "Download content from a URL. Returns the text content of the page. "
