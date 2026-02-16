@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .package_manager import PackageManager
+
 
 class ToolResult(BaseModel):
     """Result from executing a tool."""
@@ -635,7 +637,8 @@ class PipInstallTool(Tool):
         "required": ["packages"],
     }
 
-    def __init__(self, timeout: float = 120.0):
+    def __init__(self, package_manager: PackageManager | None = None, timeout: float = 120.0):
+        self.package_manager = package_manager or PackageManager()
         self.timeout = timeout
 
     def _validate_package_name(self, package: str) -> bool:
@@ -644,80 +647,6 @@ class PipInstallTool(Tool):
         # Allow alphanumeric, hyphens, underscores, dots, and brackets (for extras)
         # Examples: requests, scikit-learn, package[extra], package>=1.0.0
         pattern = r'^[a-zA-Z0-9_\-\.\[\]>=<,\s]+$'
-        return bool(re.match(pattern, package))
-
-    async def execute(self, packages: list[str], upgrade: bool = False, **kwargs: Any) -> ToolResult:
-        """Install Python packages using pip."""
-        try:
-            import subprocess
-            import sys
-
-            # Validate all package names
-            for pkg in packages:
-                if not self._validate_package_name(pkg):
-                    return ToolResult(
-                        success=False,
-                        output=None,
-                        error=f"Invalid package name: {pkg}. Package names can only contain alphanumeric characters, hyphens, underscores, dots, and version specifiers."
-                    )
-
-            # Build pip command
-            cmd = [sys.executable, "-m", "pip", "install"]
-            if upgrade:
-                cmd.append("--upgrade")
-            cmd.extend(packages)
-
-            # Run pip install
-            loop = asyncio.get_event_loop()
-            
-            def run_pip():
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout
-                )
-                return result
-
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, run_pip),
-                timeout=self.timeout + 5
-            )
-
-            if result.returncode == 0:
-                return ToolResult(
-                    success=True,
-                    output={
-                        "installed": packages,
-                        "stdout": result.stdout,
-                        "message": f"Successfully installed: {', '.join(packages)}"
-                    }
-                )
-            else:
-                return ToolResult(
-                    success=False,
-                    output=None,
-                    error=f"pip install failed with exit code {result.returncode}:\n{result.stderr}"
-                )
-
-        except subprocess.TimeoutExpired:
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"pip install timed out after {self.timeout} seconds"
-            )
-        except asyncio.TimeoutError:
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"pip install timed out after {self.timeout} seconds"
-            )
-        except Exception as e:
-            return ToolResult(success=False, output=None, error=str(e))
-
-
-class WebDownloadTool(Tool):
-    """Download content from a URL."""
 
     name = "web_download"
     description = (
@@ -893,7 +822,9 @@ def create_default_registry(
     registry.register(FileDeleteTool(allowed_directory=allowed_directory))
     registry.register(DirectoryListTool(allowed_directory=allowed_directory))
     registry.register(DirectoryCreateTool(allowed_directory=allowed_directory))
-    registry.register(PipInstallTool())
+    # Create shared package manager
+    package_manager = PackageManager()
+    registry.register(PipInstallTool(package_manager=package_manager))
     registry.register(WebDownloadTool(allowed_directory=allowed_directory))
 
     return registry
