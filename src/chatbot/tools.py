@@ -723,78 +723,136 @@ class WebDownloadTool(Tool):
     async def execute(self, url: str, save_path: str = "", max_length: int = 50000, **kwargs: Any) -> ToolResult:
         """Download content from a URL."""
         try:
-            import urllib.request
-            import urllib.error
+            import primp
             from html.parser import HTMLParser
 
             loop = asyncio.get_event_loop()
 
-            def download() -> tuple[str, int]:
-                req = urllib.request.Request(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
-                )
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    raw = resp.read()
-                    charset = resp.headers.get_content_charset() or "utf-8"
-                    content = raw.decode(charset, errors="replace")
-                    return content, len(raw)
-
-            content, raw_size = await asyncio.wait_for(
+            def download() -> dict[str, Any]:
+                try:
+                    # Use primp with browser impersonation to avoid bot detection
+                    client = primp.Client(impersonate="chrome_120", timeout=self.timeout)
+                    resp = client.get(url)
+                    
+                    content_type = resp.headers.get("content-type", "").lower()
+                    is_binary = any(t in content_type for t in ["application/pdf", "image/", "application/octet-stream", "video/", "audio/"])
+                    
+                    if is_binary:
+                        return {
+                            "is_binary": True,
+                            "content": resp.content, # bytes
+                            "length": len(resp.content),
+                            "type": content_type
+                        }
+                    else:
+                         return {
+                            "is_binary": False,
+                            "content": resp.text, # str
+                            "length": len(resp.content),
+                            "type": content_type
+                        }
+                except Exception as e:
+                    raise e
+            
+            result_data = await asyncio.wait_for(
                 loop.run_in_executor(None, download),
                 timeout=self.timeout + 5,
             )
 
-            # Simple HTML tag stripping for readability
-            class TagStripper(HTMLParser):
-                def __init__(self):
-                    super().__init__()
-                    self.result = []
-                    self._skip = False
-
-                def handle_starttag(self, tag, attrs):
-                    if tag in ("script", "style", "noscript"):
-                        self._skip = True
-
-                def handle_endtag(self, tag):
-                    if tag in ("script", "style", "noscript"):
+            if result_data["is_binary"]:
+                 # Binary handling
+                saved_path = None
+                if save_path:
+                    resolved = self._validate_path(save_path)
+                    resolved.parent.mkdir(parents=True, exist_ok=True)
+                    resolved.write_bytes(result_data["content"])
+                    saved_path = str(resolved)
+                else:
+                    # Auto-save if no path provided (prevent data loss)
+                    import os
+                    from urllib.parse import urlparse
+                    
+                    parsed = urlparse(url)
+                    filename = os.path.basename(parsed.path) or "downloaded_file"
+                    if not filename or filename == "/" or "." not in filename:
+                        # Add extension based on type if possible
+                        if "pdf" in result_data["type"]:
+                            filename = "downloaded.pdf"
+                        elif "image" in result_data["type"]:
+                             filename = "downloaded_image"
+                        else:
+                            filename = "downloaded_file"
+                            
+                    resolved = self._validate_path(filename)
+                    resolved.write_bytes(result_data["content"])
+                    saved_path = str(resolved)
+                
+                return ToolResult(
+                    success=True,
+                    output={
+                        "content": f"[Binary File Downloaded] Type: {result_data['type']}, Size: {result_data['length']} bytes. Saved to: {saved_path}",
+                        "url": url,
+                        "raw_size": result_data['length'],
+                        "text_length": 0,
+                        "truncated": False,
+                        "saved_to": saved_path,
+                        "is_binary": True
+                    },
+                )
+            else:
+                # Text handling (legacy behavior)
+                content = result_data["content"]
+                
+                # Simple HTML tag stripping for readability
+                class TagStripper(HTMLParser):
+                    def __init__(self):
+                        super().__init__()
+                        self.result = []
                         self._skip = False
-                    if tag in ("p", "br", "div", "h1", "h2", "h3", "h4", "li", "tr"):
-                        self.result.append("\n")
 
-                def handle_data(self, data):
-                    if not self._skip:
-                        self.result.append(data)
+                    def handle_starttag(self, tag, attrs):
+                        if tag in ("script", "style", "noscript"):
+                            self._skip = True
 
-            stripper = TagStripper()
-            stripper.feed(content)
-            text = "".join(stripper.result).strip()
+                    def handle_endtag(self, tag):
+                        if tag in ("script", "style", "noscript"):
+                            self._skip = False
+                        if tag in ("p", "br", "div", "h1", "h2", "h3", "h4", "li", "tr"):
+                            self.result.append("\n")
 
-            # Truncate if needed
-            truncated = False
-            if len(text) > max_length:
-                text = text[:max_length]
-                truncated = True
+                    def handle_data(self, data):
+                        if not self._skip:
+                            self.result.append(data)
 
-            # Save to file if requested
-            saved_path = None
-            if save_path:
-                resolved = self._validate_path(save_path)
-                resolved.parent.mkdir(parents=True, exist_ok=True)
-                resolved.write_text(text, encoding="utf-8")
-                saved_path = str(resolved)
+                stripper = TagStripper()
+                stripper.feed(content)
+                text = "".join(stripper.result).strip()
 
-            return ToolResult(
-                success=True,
-                output={
-                    "content": text,
-                    "url": url,
-                    "raw_size": raw_size,
-                    "text_length": len(text),
-                    "truncated": truncated,
-                    "saved_to": saved_path,
-                },
-            )
+                # Truncate if needed
+                truncated = False
+                if len(text) > max_length:
+                    text = text[:max_length]
+                    truncated = True
+
+                # Save to file if requested
+                saved_path = None
+                if save_path:
+                    resolved = self._validate_path(save_path)
+                    resolved.parent.mkdir(parents=True, exist_ok=True)
+                    resolved.write_text(text, encoding="utf-8")
+                    saved_path = str(resolved)
+
+                return ToolResult(
+                    success=True,
+                    output={
+                        "content": text,
+                        "url": url,
+                        "raw_size": result_data['length'],
+                        "text_length": len(text),
+                        "truncated": truncated,
+                        "saved_to": saved_path,
+                    },
+                )
 
         except asyncio.TimeoutError:
             return ToolResult(success=False, output=None, error=f"Download timed out for: {url}")

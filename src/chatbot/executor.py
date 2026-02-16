@@ -570,12 +570,54 @@ What alternative approach will you try?
             lines.append("  - Missing imports or dependencies (use pip_install if needed)")
             lines.append("  - Incorrect function arguments or data types")
             lines.append("  - JSON formatting issues")
+            
+            # Smart Error Hints
+            hint = self._analyze_dependency_error(task.error)
+            if hint:
+                 lines.append("")
+                 lines.append(f"💡 SMART HINT: {hint}")
 
         lines.append("")
         lines.append("---")
         lines.append("")
 
         return "\n".join(lines)
+
+    def _analyze_dependency_error(self, error: str) -> str | None:
+        """Analyze error message to provide smart fallback hints."""
+        error_lower = error.lower()
+        
+        # Heavy ML Library Failures
+        if any(x in error_lower for x in ["torch", "torchvision", "docling", "layoutparser", "detectron2", "cuda", "nividia"]):
+            return (
+                "Heavy ML library failure detected. These libraries often have complex dependency issues "
+                "or require specific hardware. \n"
+                "**RECOMMENDATION:** Switch to lighter, pure-Python alternatives if possible:\n"
+                "  - Instead of `docling`/`layoutparser`, use `PyMuPDF` (fitz), `pypdf`, or `pdfminersix`.\n"
+                "  - Instead of deep learning models, use standard string processing or regex."
+            )
+            
+        # Missing Packages
+        if "importerror" in error_lower or "modulenotfounderror" in error_lower:
+            return (
+                "Package missing or broken. \n"
+                "1. Check if the package name is correct (e.g. `PIL` vs `Pillow`, `fitz` vs `PyMuPDF`).\n"
+                "2. Try `pip_install` again.\n"
+                "3. If it persists, switch to a standard library approach (e.g. `json`, `csv`, `urllib`)."
+            )
+            
+        # Binary Incompatibility
+        if "dll load failed" in error_lower or "symbol not found" in error_lower or "version mismatch" in error_lower:
+            return (
+                "Binary incompatibility detected. This often happens with compiled extensions (C/C++).\n"
+                "**RECOMMENDATION:** Avoid complex compiled libraries. Use pure-Python alternatives or standard library tools."
+            )
+            
+        # File Access
+        if "permission denied" in error_lower or "access denied" in error_lower:
+             return "File access issue. Ensure you are writing to the current working directory or a temp folder, not system directories."
+
+        return None
 
     def _build_task_prompt(self, task: TaskNode, dag: TaskDAG) -> str:
         """Build the prompt for a task, including dependency results."""
