@@ -6,3 +6,5 @@ temporary/
 temp_data/
 downloads/
 .claude/
+
+executions/

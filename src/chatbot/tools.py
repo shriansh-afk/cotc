@@ -157,7 +157,15 @@ class PythonExecuteTool(Tool):
             stderr_output = stderr_capture.getvalue().strip()
 
             if stderr_output:
+                # Check for critical errors in stderr
+                if "Traceback" in stderr_output or "Error:" in stderr_output:
+                    return ToolResult(success=False, output=output, error=stderr_output)
                 return ToolResult(success=True, output=output, error=stderr_output)
+
+            # Check for critical errors in stdout (some scripts print errors to stdout)
+            string_output = str(output)
+            if "Traceback (most recent call last)" in string_output:
+                 return ToolResult(success=False, output=output, error="Traceback detected in output")
 
             return ToolResult(success=True, output=output or "Code executed successfully (no output)")
 

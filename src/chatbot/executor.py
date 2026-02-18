@@ -225,6 +225,18 @@ class DAGExecutor:
                     "\n- If installation fails with 'No matching distribution' or 'Conflicting dependencies', "
                     "retry WITHOUT version constraints (e.g., install 'torch' instead of 'torch==2.0.0')."
                     "\n- Avoid trying random old versions if the latest version fails; check the error message for supported versions."
+                    "\n\n**Verification & Quality Control:**"
+                    "\n- ALWAYS verify that your generated files exist and have a reasonable size (>1KB for binaries)."
+                    "\n- If a file is too small, you MUST raise a ValueError."
+                    "\n- Example: `if os.path.getsize('out.pdf') < 1024: raise ValueError('File too small')`"
+                    "\n- CRITICAL: Verify file headers! If you expect a PDF/EPUB/ZIP but get HTML text (starts with '<!DOCTYPE' or '<html'), RAISE AN ERROR."
+                    "\n- Binary files (PDF, ZIP, EPUB) must start with specific bytes (e.g. PDF starts with `%PDF`, ZIP/EPUB starts with `PK`). verify this!"
+                    "\n- This ensures the system detects the failure and retries with a better approach."
+                    "\n\n**Preferred Libraries (Use pure Python where possible):**"
+                    "\n- PDF extraction: Use `PyPDF2` (legacy: `PdfFileReader`) or `PyMuPDF` (fitz)."
+                    "\n- EPUB creation: Use `ebooklib`."
+                    "\n- AVOID system binaries like `poppler`, `tesseract`, `calibre`, `pandoc` unless strictly necessary (they are often missing)."
+                    "\n- AVOID heavy ML libraries (`layoutparser`, `torch`) for simple tasks."
                 )
 
             tool_call_count = 0
@@ -616,6 +628,24 @@ What alternative approach will you try?
         # File Access
         if "permission denied" in error_lower or "access denied" in error_lower:
              return "File access issue. Ensure you are writing to the current working directory or a temp folder, not system directories."
+
+        # API Mismatches (AttributeError)
+        if "attributeerror" in error_lower:
+            if "pypdf2" in error_lower and "pdfreader" in error_lower:
+                return (
+                    "PyPDF2 API Mismatch: You are likely using PyPDF2 < 3.0.0 which uses `PdfFileReader`, not `PdfReader`.\n"
+                    "**FIX:** Use `PdfFileReader` (legacy) OR upgrade package `pip_install(packages=['PyPDF2>=3.0.0'])`."
+                )
+            if "ebooklib" in error_lower:
+                return "ebooklib API issue. Check if you imported the module correctly (e.g. `from ebooklib import epub`)."
+
+        # NameError (Missing Imports)
+        if "nameerror" in error_lower:
+            return "Variable/Module not defined. Check your imports. Did you forget to import a library you installed?"
+
+        # ImportError (Generic)
+        if "importerror" in error_lower and "pdf2epub" in error_lower:
+             return "pdf2epub import error. This library might not export the expected function. Check its documentation or try `import pdf2epub` to inspect it."
 
         return None
 
